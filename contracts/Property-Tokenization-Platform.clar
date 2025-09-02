@@ -7,6 +7,8 @@
 (define-constant ERR_PROPERTY_NOT_ACTIVE (err u105))
 (define-constant ERR_INVALID_PRICE (err u106))
 (define-constant ERR_CANNOT_TRANSFER_TO_SELF (err u107))
+(define-constant ERR_NO_RENT_AVAILABLE (err u108))
+(define-constant ERR_ALREADY_CLAIMED (err u109))
 
 (define-data-var next-property-id uint u1)
 (define-data-var platform-fee uint u250)
@@ -52,6 +54,24 @@
     uint
 )
 
+(define-map property-rent-pools
+    uint
+    {
+        total-deposited: uint,
+        total-claimed: uint,
+        last-distribution: uint,
+    }
+)
+
+(define-map rent-claims
+    {
+        property-id: uint,
+        claimant: principal,
+        distribution-period: uint,
+    }
+    { claimed: bool }
+)
+
 (define-read-only (get-property (property-id uint))
     (map-get? properties property-id)
 )
@@ -87,6 +107,40 @@
 
 (define-read-only (get-next-property-id)
     (var-get next-property-id)
+)
+
+(define-read-only (get-rent-pool (property-id uint))
+    (map-get? property-rent-pools property-id)
+)
+
+(define-read-only (get-claimable-rent
+        (property-id uint)
+        (claimant principal)
+    )
+    (match (map-get? property-rent-pools property-id)
+        rent-pool (let (
+                (user-tokens (get-token-balance property-id claimant))
+                (total-tokens (default-to u0 (get-total-supply property-id)))
+                (current-period (get last-distribution rent-pool))
+                (already-claimed (is-some (map-get? rent-claims {
+                    property-id: property-id,
+                    claimant: claimant,
+                    distribution-period: current-period,
+                })))
+                (available-rent (- (get total-deposited rent-pool) (get total-claimed rent-pool)))
+            )
+            (if (and
+                    (> user-tokens u0)
+                    (> total-tokens u0)
+                    (not already-claimed)
+                    (> available-rent u0)
+                )
+                (ok (/ (* user-tokens available-rent) total-tokens))
+                (ok u0)
+            )
+        )
+        (ok u0)
+    )
 )
 
 (define-public (create-property
@@ -293,6 +347,69 @@
             prop (merge data { total-value: (+ (get total-value data) (* user-tokens (get price-per-token prop))) })
             data
         )
+    )
+)
+
+(define-public (deposit-rent
+        (property-id uint)
+        (amount uint)
+    )
+    (let ((property (unwrap! (get-property property-id) ERR_NOT_FOUND)))
+        (asserts! (is-eq tx-sender (get owner property)) ERR_UNAUTHORIZED)
+        (asserts! (> amount u0) ERR_INVALID_AMOUNT)
+
+        (try! (stx-transfer? amount tx-sender (as-contract tx-sender)))
+
+        (let ((current-pool (default-to {
+                total-deposited: u0,
+                total-claimed: u0,
+                last-distribution: stacks-block-height,
+            }
+                (map-get? property-rent-pools property-id)
+            )))
+            (map-set property-rent-pools property-id {
+                total-deposited: (+ (get total-deposited current-pool) amount),
+                total-claimed: (get total-claimed current-pool),
+                last-distribution: stacks-block-height,
+            })
+        )
+
+        (ok amount)
+    )
+)
+
+(define-public (claim-rent (property-id uint))
+    (let (
+            (claimable-amount (unwrap! (get-claimable-rent property-id tx-sender)
+                ERR_NO_RENT_AVAILABLE
+            ))
+            (current-pool (unwrap! (map-get? property-rent-pools property-id) ERR_NOT_FOUND))
+            (current-period (get last-distribution current-pool))
+        )
+        (asserts! (> claimable-amount u0) ERR_NO_RENT_AVAILABLE)
+        (asserts!
+            (is-none (map-get? rent-claims {
+                property-id: property-id,
+                claimant: tx-sender,
+                distribution-period: current-period,
+            }))
+            ERR_ALREADY_CLAIMED
+        )
+
+        (try! (as-contract (stx-transfer? claimable-amount tx-sender tx-sender)))
+
+        (map-set property-rent-pools property-id
+            (merge current-pool { total-claimed: (+ (get total-claimed current-pool) claimable-amount) })
+        )
+
+        (map-set rent-claims {
+            property-id: property-id,
+            claimant: tx-sender,
+            distribution-period: current-period,
+        } { claimed: true }
+        )
+
+        (ok claimable-amount)
     )
 )
 
