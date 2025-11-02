@@ -192,6 +192,46 @@
     )
 )
 
+(define-read-only (quote-purchase
+        (property-id uint)
+        (token-amount uint)
+    )
+    (let (
+            (property (unwrap! (get-property property-id) ERR_NOT_FOUND))
+            (active (get active property))
+            (available (get available-tokens property))
+            (price (get price-per-token property))
+            (total-cost (* token-amount price))
+            (fee (/ (* total-cost (var-get platform-fee)) u10000))
+            (owner-amount (- total-cost fee))
+            (ok-amount (> token-amount u0))
+            (ok-availability (>= available token-amount))
+            (allowed (and
+                active
+                ok-amount
+                ok-availability
+            ))
+            (reason (if (not ok-amount)
+                u102
+                (if (not active)
+                    u105
+                    (if (not ok-availability)
+                        u103
+                        u0
+                    )
+                )
+            ))
+        )
+        (ok {
+            total-cost: total-cost,
+            fee: fee,
+            owner-amount: owner-amount,
+            allowed: allowed,
+            reason: reason,
+        })
+    )
+)
+
 (define-public (create-property
         (address (string-ascii 100))
         (total-tokens uint)
@@ -487,9 +527,7 @@
         (asserts! (get active property) ERR_PROPERTY_NOT_ACTIVE)
 
         ;; Deactivate property during auction
-        (map-set properties property-id
-            (merge property { active: false })
-        )
+        (map-set properties property-id (merge property { active: false }))
 
         (map-set property-auctions auction-id {
             property-id: property-id,
@@ -514,10 +552,15 @@
     (let (
             (auction (unwrap! (get-auction auction-id) ERR_AUCTION_NOT_FOUND))
             (current-bid (get current-highest-bid auction))
-            (min-bid (if (> current-bid u0) (+ current-bid u1) (get starting-price auction)))
+            (min-bid (if (> current-bid u0)
+                (+ current-bid u1)
+                (get starting-price auction)
+            ))
         )
         (asserts! (not (get ended auction)) ERR_AUCTION_ENDED)
-        (asserts! (< stacks-block-height (get auction-end auction)) ERR_AUCTION_ENDED)
+        (asserts! (< stacks-block-height (get auction-end auction))
+            ERR_AUCTION_ENDED
+        )
         (asserts! (>= bid-amount min-bid) ERR_BID_TOO_LOW)
         (asserts! (not (is-eq tx-sender (get seller auction))) ERR_UNAUTHORIZED)
 
@@ -554,12 +597,12 @@
 
 (define-public (end-auction (auction-id uint))
     (let ((auction (unwrap! (get-auction auction-id) ERR_AUCTION_NOT_FOUND)))
-        (asserts! (>= stacks-block-height (get auction-end auction)) ERR_AUCTION_NOT_ENDED)
+        (asserts! (>= stacks-block-height (get auction-end auction))
+            ERR_AUCTION_NOT_ENDED
+        )
         (asserts! (not (get ended auction)) ERR_AUCTION_ENDED)
 
-        (map-set property-auctions auction-id
-            (merge auction { ended: true })
-        )
+        (map-set property-auctions auction-id (merge auction { ended: true }))
 
         (ok true)
     )
@@ -574,14 +617,15 @@
         (asserts! (not (get settled auction)) ERR_ALREADY_CLAIMED)
 
         (match (get highest-bidder auction)
-            winner (let (
+            winner
+            (let (
                     (winning-bid (get current-highest-bid auction))
                     (fee-amount (/ (* winning-bid (var-get platform-fee)) u10000))
                     (seller-amount (- winning-bid fee-amount))
                 )
                 ;; Transfer payment to seller
                 (try! (as-contract (stx-transfer? seller-amount tx-sender (get seller auction))))
-                
+
                 ;; Transfer all property tokens to winner
                 (let ((total-tokens (get total-tokens property)))
                     (map-set property-tokens {
@@ -589,16 +633,19 @@
                         holder: (get seller auction),
                     } { amount: u0 }
                     )
-                    
+
                     (map-set property-tokens {
                         property-id: (get property-id auction),
                         holder: winner,
                     } { amount: total-tokens }
                     )
-                    
+
                     ;; Update property owner
                     (map-set properties (get property-id auction)
-                        (merge property { owner: winner, active: true })
+                        (merge property {
+                            owner: winner,
+                            active: true,
+                        })
                     )
                 )
             )
@@ -608,9 +655,7 @@
             )
         )
 
-        (map-set property-auctions auction-id
-            (merge auction { settled: true })
-        )
+        (map-set property-auctions auction-id (merge auction { settled: true }))
 
         (ok true)
     )
@@ -631,7 +676,10 @@
 
         ;; Mark auction as ended and settled
         (map-set property-auctions auction-id
-            (merge auction { ended: true, settled: true })
+            (merge auction {
+                ended: true,
+                settled: true,
+            })
         )
 
         (ok true)
